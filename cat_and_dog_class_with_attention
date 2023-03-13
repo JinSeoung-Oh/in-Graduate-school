@@ -1,0 +1,158 @@
+from os import listdir
+import tensorflow as tf
+from pickle import dump
+import pickle
+import os
+from keras.applications import ResNet50
+from keras.preprocessing.image import load_img
+from keras.preprocessing.image import img_to_array
+import cv2
+from keras.layers import Input
+import numpy as np
+from PIL import Image
+
+dire= "C:\\Users\\user\\Desktop\\kagglecatsanddogs_3367a\\PetImages"
+Category=["Dog","Cat"]
+
+####### 데이터 처리는 Keras 문서 참고
+
+num_skipped=0
+
+for folder_name in ("Cat", "Dog"):
+    folder_path = os.path.join(dire, folder_name)
+    for fname in os.listdir(folder_path):
+        fpath = os.path.join(folder_path, fname)
+        try:
+            fobj=open(fpath, "rb")
+            is_jfif=tf.compat.as_bytes("JFIF") in fobj.peek(10)
+        finally:
+            fobj.close()
+                
+        if not is_jfif:
+            num_skipped += 1
+            os.remove(fpath)
+                
+print("Deleted %d images" % num_skipped)
+
+img_size=(331,331)
+batch_size=20
+
+train_set=tf.keras.preprocessing.image_dataset_from_directory(dire, validation_split=0.2,
+                                                             subset="training",
+                                                             seed=1337,
+                                                             image_size=img_size,
+                                                            batch_size=batch_size)
+
+val_set = tf.keras.preprocessing.image_dataset_from_directory(dire, validation_split=0.2,
+                                                             subset="validation",
+                                                             seed=1337,
+                                                             image_size=img_size,
+                                                             batch_size=batch_size)
+
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(10,10))
+for images, labels in train_set.take(1):
+    for i in range(9):
+        ax=plt.subplot(3,3,i+1)
+        plt.imshow(images[i].numpy().astype("uint8"))
+        plt.title(int(labels[i]))
+        plt.axis("off")
+        plt.show()
+
+def extract_features(data):
+    in_layer = Input(shape=(331, 331, 3))
+    model = ResNet50(include_top=False, input_tensor=in_layer)  
+    feature = model.predict(data, verbose=0)
+        
+    return feature
+
+features = extract_features(train_set)
+print('Extracted Features: %d' % len(features))
+
+y = np.concatenate([y for x, y in train_set], axis=0)
+y.shape
+features.shape
+
+fe_r = features.reshape(features.shape[0],121, 2048)
+fe_r.shape
+
+dump(features, open("C:\\Users\\user\\Desktop\\kagglecatsanddogs_3367a\\features.pkl", 'wb'), protocol=4)
+val_features=extract_features(val_set)
+print("Extracted Features:%d " % len(val_features))
+
+dump(features, open("C:\\Users\\user\\Desktop\\kagglecatsanddogs_3367a\\val_features.pkl", 'wb'), protocol=4)
+
+from tensorflow.keras.layers import Layer
+import tensorflow.keras.backend as K
+
+
+class attention(Layer):
+    def __init__(self,**kwargs):
+        super(attention,self).__init__(**kwargs)
+
+    def build(self,input_shape):
+        self.W=self.add_weight(name="att_weight",shape=(input_shape[-1],1),initializer="normal")
+        self.b=self.add_weight(name="att_bias",shape=(input_shape[1],1),initializer="zeros")        
+        super(attention, self).build(input_shape)
+
+    def call(self,x):
+        et=K.squeeze(K.tanh(K.dot(x,self.W)+self.b),axis=-1)
+        at=K.softmax(et)
+        at=K.expand_dims(at,axis=-1)
+        output=x*at
+        return K.sum(output,axis=1)
+
+    def compute_output_shape(self,input_shape):
+        return (input_shape[0],input_shape[-1])
+
+    def get_config(self):
+        return super(attention,self).get_config()
+
+class BahdanauAttention(tf.keras.Model):
+    def __init__(self, units):
+        super(BahdanauAttention,self).__init__()
+        self.W1 = Dense(units)
+        self.W2 = Dense(units)
+        self.V = Dense(1)
+        
+    def call(self, values, query):
+        hidden_with_time_axis = tf.expand_dims(query,1)
+        score = self.V(tf.nn.tanh(self.W1(values)+self.W2(hidden_with_time_axis)))
+        attention_weights = tf.nn.softmax(score, axis=1)
+        context_vector = attention_weights*values
+        context_vector = tf.reduce_sum(context_vector, axis=1)
+        
+        return context_vector, attention_weights
+
+from keras.layers import Dense, Dropout, Activation,Embedding,Flatten, Reshape, MaxPooling2D
+from keras.layers import LSTM, Bidirectional, GRU, Conv2D
+import keras
+
+inputs = keras.Input(shape=(121,2048))
+z = Bidirectional(LSTM(100, return_sequences=True))(inputs)
+z = attention()(z)
+z = Dense(1)(z)
+z = Activation(activation = "sigmoid")(z)
+
+from tensorflow.keras.models import Model
+model = keras.Model(inputs=inputs, outputs=z)
+model.summary()
+
+model.compile(loss="binary_crossentropy", optimizer="Adam", metrics=["accuracy"])
+from tensorflow.keras.callbacks import EarlyStopping
+early_stopping = EarlyStopping(patience = 20)
+import gc
+model.fit(x=fe_r, y=y, batch_size=32, epochs=100, callbacks = [early_stopping], validation_split = .2) #안되면 callbacks 지워
+
+img_size=(121,2048)
+
+img = keras.preprocessing.image.load_img("C:\\Users\\user\\Desktop\\test\\4cfe5c49-facc-4f98-8955-23772078dfc24.png", target_size=img_size)
+img_array = keras.preprocessing.image.img_to_array(img)
+img_array = img_array.reshape(3,121,2048)
+
+
+predictions = model.predict(img_array)
+score = predictions[0]
+
+print("This img is %.2f precent cat and %.2f percent dog." %(100*(1-score), 100*score))
